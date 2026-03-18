@@ -49,8 +49,7 @@ skill-cli add https://github.com/example/skills.git
 Add targets:
 
 ```bash
-skill-cli target add ~/.codex/.skill
-skill-cli target add ~/.claude/.skills
+skill-cli target add ~/.codex/skill
 skill-cli target add ~/.cursor/skills
 ```
 
@@ -84,8 +83,7 @@ skill-cli update --repo https://github.com/example/skills.git
 
 ```bash
 skill-cli add https://github.com/example/team-skills.git
-skill-cli target add ~/.codex/.skill
-skill-cli target add ~/.claude/.skills
+skill-cli target add ~/.codex/skill
 skill-cli target add ~/.cursor/skills
 skill-cli update
 ```
