@@ -47,6 +47,12 @@ Add a repository:
 skill-cli add https://github.com/example/skills.git
 ```
 
+Add a local directory without copying it into `~/.skill-cli/repos`:
+
+```bash
+skill-cli add ~/Documents/my-skills
+```
+
 Remove a repository:
 
 ```bash

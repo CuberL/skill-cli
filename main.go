@@ -30,6 +30,7 @@ type RepoConfig struct {
 	URL       string `json:"url"`
 	Name      string `json:"name"`
 	LocalPath string `json:"local_path"`
+	Managed   bool   `json:"managed"`
 }
 
 func main() {
@@ -48,7 +49,7 @@ func run(args []string) error {
 	switch args[0] {
 	case "add":
 		if len(args) != 2 {
-			return errors.New("usage: skill-cli add <repo-url>")
+			return errors.New("usage: skill-cli add <repo-url-or-path>")
 		}
 		return addRepo(args[1])
 	case "remove":
@@ -95,6 +96,10 @@ func runUpdate(args []string) error {
 	}
 
 	for _, repo := range repos {
+		if !repo.Managed {
+			fmt.Printf("skipping local repo: %s\n", repo.URL)
+			continue
+		}
 		fmt.Printf("updating repo: %s\n", repo.URL)
 		if err := pullRepo(repo.LocalPath); err != nil {
 			return fmt.Errorf("update repo %s: %w", repo.URL, err)
@@ -157,34 +162,44 @@ func addRepo(repoURL string) error {
 		return err
 	}
 
-	normalizedURL := strings.TrimSpace(repoURL)
-	if normalizedURL == "" {
-		return errors.New("repo url is required")
+	repoInput := strings.TrimSpace(repoURL)
+	if repoInput == "" {
+		return errors.New("repo url or path is required")
 	}
 
-	if repo, found := findRepo(cfg, normalizedURL); found {
+	reference, isLocalPath, err := resolveRepoReference(repoInput)
+	if err != nil {
+		return err
+	}
+
+	if repo, found := findRepo(cfg, reference); found {
 		fmt.Printf("repo already configured: %s\n", repo.URL)
 		return syncAll(cfg)
 	}
 
-	repoName, err := deriveRepoName(normalizedURL)
+	repoName, err := deriveRepoName(reference)
 	if err != nil {
 		return err
 	}
 
-	localPath, err := uniqueRepoPath(repoName)
-	if err != nil {
-		return err
-	}
-
-	if err := cloneRepo(normalizedURL, localPath); err != nil {
-		return err
+	localPath := reference
+	managed := false
+	if !isLocalPath {
+		localPath, err = uniqueRepoPath(repoName)
+		if err != nil {
+			return err
+		}
+		if err := cloneRepo(reference, localPath); err != nil {
+			return err
+		}
+		managed = true
 	}
 
 	cfg.Repos = append(cfg.Repos, RepoConfig{
-		URL:       normalizedURL,
+		URL:       reference,
 		Name:      repoName,
 		LocalPath: localPath,
+		Managed:   managed,
 	})
 	sortConfig(&cfg)
 
@@ -192,7 +207,7 @@ func addRepo(repoURL string) error {
 		return err
 	}
 
-	fmt.Printf("added repo: %s\n", normalizedURL)
+	fmt.Printf("added repo: %s\n", reference)
 	return syncAll(cfg)
 }
 
@@ -247,8 +262,10 @@ func removeRepo(repoFilter string) error {
 		}
 	}
 
-	if err := os.RemoveAll(repo.LocalPath); err != nil {
-		return fmt.Errorf("remove local repo %s: %w", repo.LocalPath, err)
+	if repo.Managed {
+		if err := os.RemoveAll(repo.LocalPath); err != nil {
+			return fmt.Errorf("remove local repo %s: %w", repo.LocalPath, err)
+		}
 	}
 
 	cfg.Repos = append(cfg.Repos[:index], cfg.Repos[index+1:]...)
@@ -526,7 +543,7 @@ func sanitizeName(name string) string {
 
 func findRepo(cfg Config, repoURL string) (RepoConfig, bool) {
 	for _, repo := range cfg.Repos {
-		if repo.URL == repoURL {
+		if repo.URL == repoURL || repo.LocalPath == repoURL {
 			return repo, true
 		}
 	}
@@ -535,7 +552,7 @@ func findRepo(cfg Config, repoURL string) (RepoConfig, bool) {
 
 func resolveSingleRepo(cfg Config, repoFilter string) (RepoConfig, int, error) {
 	for i, repo := range cfg.Repos {
-		if repo.URL == repoFilter || repo.Name == repoFilter {
+		if repo.URL == repoFilter || repo.Name == repoFilter || repo.LocalPath == repoFilter {
 			return repo, i, nil
 		}
 	}
@@ -550,7 +567,7 @@ func filterRepos(cfg Config, repoFilter string) ([]RepoConfig, error) {
 
 	var matches []RepoConfig
 	for _, repo := range cfg.Repos {
-		if repo.URL == repoFilter || repo.Name == repoFilter {
+		if repo.URL == repoFilter || repo.Name == repoFilter || repo.LocalPath == repoFilter {
 			matches = append(matches, repo)
 		}
 	}
@@ -580,6 +597,17 @@ func loadConfig() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Managed {
+			continue
+		}
+		managed, err := inferManagedRepo(cfg.Repos[i].LocalPath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Repos[i].Managed = managed
 	}
 
 	sortConfig(&cfg)
@@ -620,7 +648,12 @@ func sortConfig(cfg *Config) {
 func printConfig(cfg Config, showAll bool) {
 	fmt.Println("repos:")
 	for _, repo := range cfg.Repos {
-		fmt.Printf("- %s (%s)\n", repo.URL, repo.LocalPath)
+		switch {
+		case !repo.Managed && repo.URL == repo.LocalPath:
+			fmt.Printf("- %s (local)\n", repo.URL)
+		default:
+			fmt.Printf("- %s (%s)\n", repo.URL, repo.LocalPath)
+		}
 		if !showAll {
 			continue
 		}
@@ -647,7 +680,7 @@ func printUsage() {
 	fmt.Println(`skill-cli
 
 Usage:
-  skill-cli add <repo-url>
+  skill-cli add <repo-url-or-path>
   skill-cli remove <repo-url-or-name>
   skill-cli target add <path>
   skill-cli target remove <path>
@@ -702,4 +735,38 @@ func expandPath(value string) (string, error) {
 	}
 
 	return filepath.Abs(value)
+}
+
+func resolveRepoReference(value string) (string, bool, error) {
+	expanded, err := expandPath(value)
+	if err == nil {
+		info, statErr := os.Stat(expanded)
+		if statErr == nil {
+			if !info.IsDir() {
+				return "", false, fmt.Errorf("local path is not a directory: %s", expanded)
+			}
+			return expanded, true, nil
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", false, statErr
+		}
+	}
+
+	return value, false, nil
+}
+
+func inferManagedRepo(localPath string) (bool, error) {
+	repoRoot, err := reposRoot()
+	if err != nil {
+		return false, err
+	}
+
+	rel, err := filepath.Rel(repoRoot, localPath)
+	if err != nil {
+		return false, nil
+	}
+	if rel == "." {
+		return true, nil
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..", nil
 }
