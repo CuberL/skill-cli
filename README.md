@@ -1,14 +1,15 @@
 # skill-cli
 
-`skill-cli` is a command-line tool for managing shared skill repositories and syncing them into multiple AI tool targets with symlinks.
+`skill-cli` is a command-line tool for managing shared skill repositories and syncing them into target directories with symlinks.
 
 ## Features
 
 - Add a skill repository once and reuse it across multiple targets
 - Clone repositories locally on first add
-- Sync all discovered skills into Codex, Claude Code, Cursor, or any other target directory
+- Sync all discovered skills into target directories with symlinks
 - Update all configured repositories with one command
 - Update a single repository with `--repo`
+- Remove repositories and targets cleanly
 
 ## Requirements
 
@@ -46,18 +47,32 @@ Add a repository:
 skill-cli add https://github.com/example/skills.git
 ```
 
+Remove a repository:
+
+```bash
+skill-cli remove my-skills
+skill-cli remove https://github.com/example/skills.git
+```
+
 Add targets:
 
 ```bash
-skill-cli target add ~/.codex/skill
+skill-cli target add ~/.codex/skills
 skill-cli target add ~/.cursor/skills
 skill-cli target add ~/.claude/skills/
+```
+
+Remove a target:
+
+```bash
+skill-cli target remove ~/.codex/skills
 ```
 
 List current configuration:
 
 ```bash
 skill-cli list
+skill-cli list --all
 skill-cli target list
 ```
 
@@ -84,7 +99,7 @@ skill-cli update --repo https://github.com/example/skills.git
 
 ```bash
 skill-cli add https://github.com/example/team-skills.git
-skill-cli target add ~/.codex/skill
+skill-cli target add ~/.codex/skills
 skill-cli target add ~/.cursor/skills
 skill-cli target add ~/.claude/skills/
 skill-cli update
@@ -94,4 +109,6 @@ skill-cli update
 
 - `skill-cli add` automatically syncs the new repository to all existing targets.
 - `skill-cli target add` automatically syncs all configured repositories to the new target.
+- `skill-cli remove` removes the configured repository, deletes its local clone, and cleans up matching symlinks from all targets.
+- `skill-cli target remove` removes the target from configuration and cleans up matching symlinks in that target.
 - If a target already contains a non-symlink path with the same skill name, `skill-cli` will report a conflict instead of overwriting it.

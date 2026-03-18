@@ -51,6 +51,11 @@ func run(args []string) error {
 			return errors.New("usage: skill-cli add <repo-url>")
 		}
 		return addRepo(args[1])
+	case "remove":
+		if len(args) != 2 {
+			return errors.New("usage: skill-cli remove <repo-url-or-name>")
+		}
+		return removeRepo(args[1])
 	case "target":
 		return runTarget(args[1:])
 	case "sync":
@@ -62,12 +67,7 @@ func run(args []string) error {
 	case "update":
 		return runUpdate(args[1:])
 	case "list":
-		cfg, err := loadConfig()
-		if err != nil {
-			return err
-		}
-		printConfig(cfg)
-		return nil
+		return runList(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return nil
@@ -104,6 +104,23 @@ func runUpdate(args []string) error {
 	return syncAll(cfg)
 }
 
+func runList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	showAll := fs.Bool("all", false, "show installed skills under each repo")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	printConfig(cfg, *showAll)
+	return nil
+}
+
 func runTarget(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: skill-cli target <add|list> [...]")
@@ -115,6 +132,11 @@ func runTarget(args []string) error {
 			return errors.New("usage: skill-cli target add <path>")
 		}
 		return addTarget(args[1])
+	case "remove":
+		if len(args) != 2 {
+			return errors.New("usage: skill-cli target remove <path>")
+		}
+		return removeTarget(args[1])
 	case "list":
 		cfg, err := loadConfig()
 		if err != nil {
@@ -203,6 +225,76 @@ func addTarget(target string) error {
 	return syncAll(cfg)
 }
 
+func removeRepo(repoFilter string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	repo, index, err := resolveSingleRepo(cfg, strings.TrimSpace(repoFilter))
+	if err != nil {
+		return err
+	}
+
+	skills, err := discoverSkills(repo.LocalPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("discover repo %s: %w", repo.URL, err)
+	}
+
+	for _, target := range cfg.Targets {
+		if err := removeSkillsFromTarget(skills, target); err != nil {
+			return fmt.Errorf("remove repo %s from %s: %w", repo.URL, target, err)
+		}
+	}
+
+	if err := os.RemoveAll(repo.LocalPath); err != nil {
+		return fmt.Errorf("remove local repo %s: %w", repo.LocalPath, err)
+	}
+
+	cfg.Repos = append(cfg.Repos[:index], cfg.Repos[index+1:]...)
+	if err := saveConfig(cfg); err != nil {
+		return err
+	}
+
+	fmt.Printf("removed repo: %s\n", repo.URL)
+	return syncAll(cfg)
+}
+
+func removeTarget(target string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	resolvedTarget, err := expandPath(target)
+	if err != nil {
+		return err
+	}
+
+	index := slices.Index(cfg.Targets, resolvedTarget)
+	if index == -1 {
+		return fmt.Errorf("target not found: %s", resolvedTarget)
+	}
+
+	for _, repo := range cfg.Repos {
+		skills, err := discoverSkills(repo.LocalPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("discover repo %s: %w", repo.URL, err)
+		}
+		if err := removeSkillsFromTarget(skills, resolvedTarget); err != nil {
+			return fmt.Errorf("remove repo %s from %s: %w", repo.URL, resolvedTarget, err)
+		}
+	}
+
+	cfg.Targets = append(cfg.Targets[:index], cfg.Targets[index+1:]...)
+	if err := saveConfig(cfg); err != nil {
+		return err
+	}
+
+	fmt.Printf("removed target: %s\n", resolvedTarget)
+	return nil
+}
+
 func syncAll(cfg Config) error {
 	var errs []error
 	for _, repo := range cfg.Repos {
@@ -244,6 +336,17 @@ func syncRepoToTarget(skills []string, target string) error {
 	return nil
 }
 
+func removeSkillsFromTarget(skills []string, target string) error {
+	for _, skillPath := range skills {
+		linkName := filepath.Join(target, filepath.Base(skillPath))
+		if err := removeSymlinkIfMatches(skillPath, linkName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func ensureSymlink(source, linkName string) error {
 	info, err := os.Lstat(linkName)
 	if err == nil {
@@ -269,6 +372,39 @@ func ensureSymlink(source, linkName string) error {
 	}
 
 	return os.Symlink(source, linkName)
+}
+
+func removeSymlinkIfMatches(source, linkName string) error {
+	info, err := os.Lstat(linkName)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+
+	existing, err := os.Readlink(linkName)
+	if err != nil {
+		return err
+	}
+
+	existingAbs := existing
+	if !filepath.IsAbs(existingAbs) {
+		existingAbs = filepath.Join(filepath.Dir(linkName), existingAbs)
+	}
+	existingAbs = filepath.Clean(existingAbs)
+
+	if existingAbs != filepath.Clean(source) {
+		resolved, resolveErr := filepath.EvalSymlinks(linkName)
+		if resolveErr != nil || filepath.Clean(resolved) != filepath.Clean(source) {
+			return nil
+		}
+	}
+
+	return os.Remove(linkName)
 }
 
 func discoverSkills(repoRoot string) ([]string, error) {
@@ -397,6 +533,16 @@ func findRepo(cfg Config, repoURL string) (RepoConfig, bool) {
 	return RepoConfig{}, false
 }
 
+func resolveSingleRepo(cfg Config, repoFilter string) (RepoConfig, int, error) {
+	for i, repo := range cfg.Repos {
+		if repo.URL == repoFilter || repo.Name == repoFilter {
+			return repo, i, nil
+		}
+	}
+
+	return RepoConfig{}, -1, fmt.Errorf("repo not found: %s", repoFilter)
+}
+
 func filterRepos(cfg Config, repoFilter string) ([]RepoConfig, error) {
 	if repoFilter == "" {
 		return cfg.Repos, nil
@@ -471,10 +617,25 @@ func sortConfig(cfg *Config) {
 	})
 }
 
-func printConfig(cfg Config) {
+func printConfig(cfg Config, showAll bool) {
 	fmt.Println("repos:")
 	for _, repo := range cfg.Repos {
 		fmt.Printf("- %s (%s)\n", repo.URL, repo.LocalPath)
+		if !showAll {
+			continue
+		}
+		skills, err := discoverSkills(repo.LocalPath)
+		if err != nil {
+			fmt.Printf("  - error: %v\n", err)
+			continue
+		}
+		if len(skills) == 0 {
+			fmt.Println("  - skills: none")
+			continue
+		}
+		for _, skillPath := range skills {
+			fmt.Printf("  - %s\n", filepath.Base(skillPath))
+		}
 	}
 	fmt.Println("targets:")
 	for _, target := range cfg.Targets {
@@ -487,9 +648,11 @@ func printUsage() {
 
 Usage:
   skill-cli add <repo-url>
+  skill-cli remove <repo-url-or-name>
   skill-cli target add <path>
+  skill-cli target remove <path>
   skill-cli target list
-  skill-cli list
+  skill-cli list [--all]
   skill-cli sync
   skill-cli update [--repo <repo-url-or-name>]`)
 }
