@@ -51,6 +51,7 @@ Add targets:
 ```bash
 skill-cli target add ~/.codex/skill
 skill-cli target add ~/.cursor/skills
+skill-cli target add ~/.claude/skills/
 ```
 
 List current configuration:
@@ -85,6 +86,7 @@ skill-cli update --repo https://github.com/example/skills.git
 skill-cli add https://github.com/example/team-skills.git
 skill-cli target add ~/.codex/skill
 skill-cli target add ~/.cursor/skills
+skill-cli target add ~/.claude/skills/
 skill-cli update
 ```
 
