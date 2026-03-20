@@ -314,6 +314,14 @@ func removeTarget(target string) error {
 
 func syncAll(cfg Config) error {
 	var errs []error
+	repoRoots := collectRepoRoots(cfg.Repos)
+
+	for _, target := range cfg.Targets {
+		if err := cleanupTargetSymlinks(target, repoRoots); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup target %s: %w", target, err))
+		}
+	}
+
 	for _, repo := range cfg.Repos {
 		skills, err := discoverSkills(repo.LocalPath)
 		if err != nil {
@@ -336,6 +344,54 @@ func syncAll(cfg Config) error {
 		fmt.Fprintf(os.Stderr, "sync warning: %v\n", err)
 	}
 	return errors.New("sync completed with warnings")
+}
+
+func collectRepoRoots(repos []RepoConfig) []string {
+	repoRoots := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		repoRoots = append(repoRoots, filepath.Clean(repo.LocalPath))
+	}
+	return repoRoots
+}
+
+func cleanupTargetSymlinks(target string, repoRoots []string) error {
+	if len(repoRoots) == 0 {
+		return nil
+	}
+
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	return filepath.WalkDir(target, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+
+		linkTarget, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+
+		resolvedTarget := linkTarget
+		if !filepath.IsAbs(resolvedTarget) {
+			resolvedTarget = filepath.Join(filepath.Dir(path), resolvedTarget)
+		}
+		resolvedTarget = filepath.Clean(resolvedTarget)
+
+		for _, repoRoot := range repoRoots {
+			if isPathWithin(resolvedTarget, repoRoot) {
+				return os.Remove(path)
+			}
+		}
+
+		return nil
+	})
 }
 
 func syncRepoToTarget(skills []string, target string) error {
@@ -425,8 +481,7 @@ func removeSymlinkIfMatches(source, linkName string) error {
 }
 
 func discoverSkills(repoRoot string) ([]string, error) {
-	var skills []string
-	seen := map[string]struct{}{}
+	var discovered []string
 
 	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -441,20 +496,57 @@ func discoverSkills(repoRoot string) ([]string, error) {
 		if d.Name() != "SKILL.md" {
 			return nil
 		}
-		skillDir := filepath.Dir(path)
-		if _, ok := seen[filepath.Base(skillDir)]; ok {
-			return fmt.Errorf("duplicate skill directory name detected: %s", filepath.Base(skillDir))
-		}
-		seen[filepath.Base(skillDir)] = struct{}{}
-		skills = append(skills, skillDir)
+		discovered = append(discovered, filepath.Clean(filepath.Dir(path)))
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	slices.Sort(discovered)
+
+	discoveredSet := make(map[string]struct{}, len(discovered))
+	for _, skillDir := range discovered {
+		discoveredSet[skillDir] = struct{}{}
+	}
+
+	var skills []string
+	seen := map[string]struct{}{}
+	repoRoot = filepath.Clean(repoRoot)
+
+	for _, skillDir := range discovered {
+		if isSubSkill(repoRoot, skillDir, discoveredSet) {
+			continue
+		}
+		if _, ok := seen[filepath.Base(skillDir)]; ok {
+			return nil, fmt.Errorf("duplicate skill directory name detected: %s", filepath.Base(skillDir))
+		}
+		seen[filepath.Base(skillDir)] = struct{}{}
+		skills = append(skills, skillDir)
+	}
+
 	slices.Sort(skills)
 	return skills, nil
+}
+
+func isSubSkill(repoRoot, skillDir string, discoveredSet map[string]struct{}) bool {
+	parent := filepath.Dir(skillDir)
+	for {
+		if parent == skillDir || parent == "." {
+			return false
+		}
+		if _, ok := discoveredSet[parent]; ok {
+			return true
+		}
+		if parent == repoRoot {
+			return false
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return false
+		}
+		parent = next
+	}
 }
 
 func shouldSkipDir(name string) bool {
@@ -769,4 +861,20 @@ func inferManagedRepo(localPath string) (bool, error) {
 		return true, nil
 	}
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..", nil
+}
+
+func isPathWithin(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+
+	if path == root {
+		return true
+	}
+
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
